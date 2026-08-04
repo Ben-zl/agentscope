@@ -78,11 +78,6 @@ def ws_gateway_script(workspace_id: str) -> str:
     return ntpath.join(ws_gateway_home(workspace_id), "_mcp_gateway_app.py")
 
 
-def ws_mcp_file(workspace_id: str) -> str:
-    """Return the ``.mcp`` config path for *workspace_id*."""
-    return ntpath.join(ws_workdir(workspace_id), ".mcp")
-
-
 def ws_gateway_log(workspace_id: str) -> str:
     """Return the gateway log path for *workspace_id*."""
     return ntpath.join(ws_gateway_home(workspace_id), "gateway.log")

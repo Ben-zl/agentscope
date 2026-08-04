@@ -491,10 +491,7 @@ class WorkspaceBase:
         return True
 
     @staticmethod
-    def _path_to_file_uri(
-        path: str,
-        backend: BackendBase | None = None,
-    ) -> str:
+    def _path_to_file_uri(path: str) -> str:
         """Convert an absolute backend-side path to a ``file://`` URI.
 
         Absolute POSIX paths (every remote backend, plus
@@ -505,8 +502,6 @@ class WorkspaceBase:
         """
         if path.startswith("/"):
             return f"file://{path}"
-        if backend is not None and backend.isabs(path):
-            return "file:///" + path.replace("\\", "/")
         return Path(path).as_uri()
 
     # ── lifecycle (developer) ──────────────────────────────────────

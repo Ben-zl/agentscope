@@ -20,7 +20,7 @@ Overrides summary:
   supervisor-managed gateway start.
 * ``_ensure_workspace_layout`` — replaces ``mkdir -p`` with PowerShell.
 * Shared skill hooks select Windows paths and PowerShell operations.
-* ``add_mcp`` / ``remove_mcp`` — gateway is the single ``.mcp`` writer.
+* MCP declaration and skill partition semantics are inherited unchanged.
 * ``list_tools`` — PowerShell shell + Windows-adapted Glob/Grep.
 * ``initialize`` — try/except rollback.
 """
@@ -28,7 +28,6 @@ Overrides summary:
 from __future__ import annotations
 
 import asyncio
-import json
 import ntpath
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -52,7 +51,6 @@ from ._constants import (
     ws_gateway_python,
     ws_gateway_script,
     ws_glob_helper,
-    ws_mcp_file,
     ws_ripgrep,
     ws_workdir,
     validate_workspace_id,
@@ -237,7 +235,6 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
 
     async def _ensure_workspace_layout(self) -> None:
         """Create workspace dirs using PowerShell (parent uses mkdir -p)."""
-        backend = self.get_backend()
         dirs = [
             self.workdir,
             ntpath.join(self.workdir, "data"),
@@ -246,26 +243,6 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
             self._gateway_home,
         ]
         await self._shell_makedirs(*dirs)
-
-        # Seed .mcp (same logic as parent but using our backend).
-        payload = json.dumps(
-            [m.model_dump(mode="json") for m in self.default_mcps],
-            indent=2,
-            ensure_ascii=False,
-        ).encode("utf-8")
-
-        mcp_path = ws_mcp_file(self.workspace_id)
-        if await backend.file_exists(mcp_path):
-            try:
-                existing = await backend.read_file(mcp_path)
-                parsed = json.loads(existing.decode("utf-8"))
-                if isinstance(parsed, list):
-                    return
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                logger.warning(
-                    "%s: .mcp corrupted, reseeding", type(self).__name__
-                )
-        await backend.write_file(mcp_path, payload)
 
     # ── override: gateway setup (supervisor-managed) ────────────────
 
@@ -292,6 +269,7 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
 
         # 4. Build the gateway client (direct HTTP).
         self._gateway = WinGatewayClient(
+            backend=backend,
             base_url=f"http://127.0.0.1:{gw_port}",
             auth_token=self._supervisor_info["auth_token"],
             instance_nonce=self._supervisor_info["instance_nonce"],
@@ -319,8 +297,8 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
                 f"Tail of gateway log:\n{tail}",
             )
 
-        # 6. Sync MCP list from gateway.
-        self._mcps = list(await self._gateway.list_mcps())
+        # 6. Install recovery callback. The gateway starts empty; MCPs are
+        # registered lazily per agent/session by the base implementation.
         self._gateway.set_recovery_callback(self._reconnect)
 
         # 7. Start lease renew.
@@ -334,8 +312,10 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
         try:
             await self._provision_backend()
             assert self._backend is not None
+            self._mcp_specs = await self._restore_mcp_specs()
             await self._ensure_workspace_layout()
             await self._setup_mcp_gateway()
+            await self._migrate_skill_layout()
             await self._setup_skills()
         except Exception:
             if self._gateway is not None:
@@ -370,48 +350,6 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
                 await self.add_skill(path)
             except Exception as e:
                 logger.warning("Skip skill %r: %s", path, e)
-
-    # ── override: MCP management (gateway is single writer) ──────────
-
-    async def add_mcp(self, mcp_client: MCPClient) -> None:
-        if self._gateway is None:
-            raise RuntimeError("Workspace has no MCP gateway attached.")
-        async with self._mcp_lock:
-            if any(m.name == mcp_client.name for m in self._mcps):
-                raise ValueError(
-                    f"MCP {mcp_client.name!r} already exists in workspace.",
-                )
-            spec = mcp_client.model_dump(mode="json")
-            gw_client = self._gateway.make_client(spec)
-            await gw_client.connect()
-            self._mcps.append(gw_client)
-            # No _save_mcp_file — gateway persists atomically.
-
-    async def remove_mcp(self, name: str) -> None:
-        if self._gateway is None:
-            raise RuntimeError("Workspace has no MCP gateway attached.")
-        async with self._mcp_lock:
-            for i, mcp in enumerate(self._mcps):
-                if mcp.name == name:
-                    await mcp.close(ignore_errors=False)
-                    self._mcps.pop(i)
-                    return
-            logger.warning("MCP %r not found in workspace", name)
-
-    async def reset(self) -> None:
-        """Reset runtime and persisted state without a host-side MCP write."""
-        backend = self.get_backend()
-        async with self._mcp_lock, self._skill_lock:
-            while self._mcps:
-                mcp = self._mcps[0]
-                await mcp.close(ignore_errors=False)
-                self._mcps.pop(0)
-            for path in (
-                self._sessions_dir,
-                self._data_dir,
-                self._skills_dir,
-            ):
-                await backend.delete_path(path)
 
     # ── bootstrap ───────────────────────────────────────────────────
 
@@ -513,7 +451,6 @@ class WindowsWorkspace(SandboxedWorkspaceBase):
             )
 
         self.gateway_port = new_port
-        self._mcps = list(await self._gateway.list_mcps())
 
     # ── supervisor HTTP ─────────────────────────────────────────────
 

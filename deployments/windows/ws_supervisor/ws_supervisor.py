@@ -234,10 +234,6 @@ def _ws_gw_script(ws_id: str) -> str:
     return os.path.join(_ws_gw_home(ws_id), "_mcp_gateway_app.py")
 
 
-def _ws_mcp_file(ws_id: str) -> str:
-    return os.path.join(_ws_workdir(ws_id), ".mcp")
-
-
 def _ws_gw_log(ws_id: str) -> str:
     return os.path.join(_ws_gw_home(ws_id), "gateway.log")
 
@@ -444,12 +440,10 @@ class Supervisor:
 
         python = _ws_gw_python(ws_id)
         script = _ws_gw_script(ws_id)
-        config = _ws_mcp_file(ws_id)
         workdir = _ws_workdir(ws_id)
 
         cmdline = (
             f'"{python}" -u "{script}"'
-            f' --config "{config}"'
             f" --port {port}"
             f" --auth-token {auth_token}"
             f" --instance-nonce {instance_nonce}"

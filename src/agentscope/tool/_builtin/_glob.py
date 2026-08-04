@@ -278,11 +278,9 @@ codebase."""  # ignore: E501
             return ToolChunk(
                 content=[
                     TextBlock(
-                        text=(
-                            f"Glob helper failed: {stderr}"
-                            if stderr
-                            else "Glob helper failed with no error output."
-                        ),
+                        text=f"Glob helper failed: {stderr}"
+                        if stderr
+                        else "Glob helper failed with no error output.",
                     ),
                 ],
                 state=ToolResultState.ERROR,

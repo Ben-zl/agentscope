@@ -7,6 +7,12 @@
 > v2: `docs/research/windows-workspace-form2-design-v2.md`
 > v3: `docs/research/windows-workspace-form2-design-v3.md`
 
+> **上游同步说明（2026-08-12）**：本文记录基于 `9d1026fa` 的原始设计。
+> 合入 `8f24009a` 后，MCP 声明改由 workspace 按 `(agent_id, session_id)`
+> 持久化，gateway 以空 registry 启动并仅维护会话隔离的运行实例；skill 也改为
+> agent 分区。因此下文关于 gateway 写 `.mcp`、`--config`、启动时加载 MCP，
+> 以及 Windows `file://` 特例的内容均为历史方案，不代表当前实现。
+
 ---
 
 ## 0. v3 问题与本版对策

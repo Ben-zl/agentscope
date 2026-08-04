@@ -5,19 +5,23 @@ Subclasses :class:`GatewayClient` and overrides :meth:`exec_request`
 to talk to the gateway over a persistent ``httpx`` connection (tunneled
 via SSH local port forwarding) instead of the default exec-shell shim.
 
-The shared :class:`GatewayClient` accepts a transport-less instance for this
-subclass. We inherit ``health``, ``list_mcps``, and ``make_client`` and only
-replace request dispatch and connection cleanup.
+The inherited facade retains the real remote backend for diagnostics. This
+subclass inherits ``health``, ``list_mcps``, and ``make_client`` and only
+replaces request dispatch and connection cleanup.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 import httpx
 
 from .._gateway_client import GatewayClient
+
+if TYPE_CHECKING:
+    from ...tool import BackendBase
 
 
 class WinGatewayClient(GatewayClient):
@@ -30,6 +34,7 @@ class WinGatewayClient(GatewayClient):
     def __init__(
         self,
         *,
+        backend: "BackendBase",
         base_url: str,
         auth_token: str | None = None,
         instance_nonce: str | None = None,
@@ -39,6 +44,8 @@ class WinGatewayClient(GatewayClient):
         """Build a direct-HTTP gateway client.
 
         Args:
+            backend: Remote Windows backend, retained for inherited
+                diagnostics and facade state.
             base_url: Gateway base URL, e.g.
                 ``http://127.0.0.1:12345`` (a locally-forwarded port).
             auth_token: Bearer token for gateway auth.
@@ -47,7 +54,7 @@ class WinGatewayClient(GatewayClient):
             timeout: Per-request timeout.
         """
         super().__init__(
-            backend=None,
+            backend=backend,
             gateway_port=0,
             timeout=timeout,
             auth_token=auth_token,
@@ -88,45 +95,51 @@ class WinGatewayClient(GatewayClient):
         method: str,
         path: str,
         *,
+        params: dict[str, str] | None = None,
         body: Any = None,
         include_auth: bool = True,
     ) -> tuple[int, bytes]:
         """Send a direct HTTP request (overrides the shim transport)."""
-        client = self._get_client()
-        headers: dict[str, str] = {}
-        if not include_auth:
-            headers["Authorization"] = ""
+        path = f"{path}?{urlencode(params)}" if params else path
         try:
-            resp = await client.request(
-                method,
-                path,
-                json=body,
-                headers=headers,
-            )
-        except httpx.TransportError:
-            if (
-                self._recovery_callback is None
-                or self._recovering
-                or path == "/health"
-            ):
-                raise
-            self._recovering = True
             try:
-                await self._recovery_callback()
-            finally:
-                self._recovering = False
-            if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
-                # Delivery is ambiguous after a transport failure. Replaying a
-                # mutation could duplicate a tool call or turn a successful
-                # MCP update into a misleading conflict response.
-                raise
-            resp = await self._get_client().request(
-                method,
-                path,
-                json=body,
-                headers=headers,
-            )
-        return resp.status_code, resp.content
+                client = self._get_client()
+                headers: dict[str, str] = {}
+                if not include_auth:
+                    headers["Authorization"] = ""
+                resp = await client.request(
+                    method,
+                    path,
+                    json=body,
+                    headers=headers,
+                )
+            except httpx.TransportError:
+                if (
+                    self._recovery_callback is None
+                    or self._recovering
+                    or path == "/health"
+                ):
+                    raise
+                self._recovering = True
+                try:
+                    await self._recovery_callback()
+                finally:
+                    self._recovering = False
+                if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                    # Delivery is ambiguous after a transport failure.
+                    # Replaying a mutation could duplicate a tool call.
+                    raise
+                resp = await self._get_client().request(
+                    method,
+                    path,
+                    json=body,
+                    headers=headers,
+                )
+            return resp.status_code, resp.content
+        except Exception as error:
+            if path != "/health":
+                await self._diagnose_failure(method, path, error)
+            raise
 
     def set_recovery_callback(
         self,

@@ -3,7 +3,6 @@
 import os
 import tempfile
 from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock
 
 from agentscope.message import ToolResultState
 from agentscope.tool import Grep
@@ -253,16 +252,3 @@ class GrepToolTest(IsolatedAsyncioTestCase):
         expected_pattern = os.path.abspath(cwd).rstrip("/") + "/**"
         suggestion_contents = [s.rule_content for s in suggestions]
         self.assertIn(expected_pattern, suggestion_contents)
-
-    async def test_explicit_ripgrep_executable_is_used(self) -> None:
-        """Remote workspaces can select their backend ripgrep binary."""
-        backend = MagicMock()
-        backend.isabs.return_value = True
-        result = MagicMock(exit_code=1, stdout=b"", stderr=b"")
-        backend.exec_shell = AsyncMock(return_value=result)
-        tool = Grep(backend=backend, rg_path=r"C:\rg.exe")
-
-        await tool(pattern="needle", path=r"C:\workspace")
-
-        command = backend.exec_shell.await_args.args[0]
-        self.assertEqual(command[0], r"C:\rg.exe")

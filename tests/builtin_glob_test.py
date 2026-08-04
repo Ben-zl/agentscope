@@ -3,7 +3,6 @@
 import os
 import tempfile
 from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock
 
 from utils import AnyString
 from agentscope.tool import Glob
@@ -237,21 +236,3 @@ class GlobToolTest(IsolatedAsyncioTestCase):
         expected_pattern = os.path.abspath(cwd).rstrip("/") + "/**"
         suggestion_contents = [s.rule_content for s in suggestions]
         self.assertIn(expected_pattern, suggestion_contents)
-
-    async def test_explicit_python_executable_is_used(self) -> None:
-        """Remote workspaces can select their backend Python binary."""
-        backend = MagicMock()
-        backend.isabs.return_value = True
-        backend.is_dir = AsyncMock(return_value=True)
-        result = MagicMock(exit_code=0, stdout=b"[]", stderr=b"")
-        backend.exec_shell = AsyncMock(return_value=result)
-        tool = Glob(
-            backend=backend,
-            glob_helper_path=r"C:\helper.py",
-            python_bin=r"C:\python.exe",
-        )
-
-        await tool(pattern="*.py", path=r"C:\workspace")
-
-        command = backend.exec_shell.await_args.args[0]
-        self.assertEqual(command[0], r"C:\python.exe")

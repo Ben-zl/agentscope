@@ -12,7 +12,6 @@ import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import types
 import unittest
 from unittest.async_case import IsolatedAsyncioTestCase
@@ -179,31 +178,21 @@ class TestWindowsWorkspace(IsolatedAsyncioTestCase):
         self.assertNotEqual(a._lease_id, b._lease_id)
         self.assertTrue(a._lease_id.startswith("lease-"))
 
-    def test_add_mcp_no_save_mcp_file(self):
-        """add_mcp override must not call host-side _save_mcp_file."""
-        import inspect
-        import re
+    def test_mcp_management_uses_shared_agent_session_contract(self):
         from agentscope.workspace import WindowsWorkspace
+        from agentscope.workspace._sandboxed_base import SandboxedWorkspaceBase
 
-        src = inspect.getsource(WindowsWorkspace.add_mcp)
-        lines = [l for l in src.splitlines() if not l.strip().startswith("#")]
-        clean = "\n".join(lines)
-        self.assertFalse(
-            re.search(r"\b_save_mcp_file\s*\(", clean),
-            "add_mcp must not call _save_mcp_file",
+        self.assertIs(
+            WindowsWorkspace.add_mcp,
+            SandboxedWorkspaceBase.add_mcp,
         )
-
-    def test_remove_mcp_no_save_mcp_file(self):
-        import inspect
-        import re
-        from agentscope.workspace import WindowsWorkspace
-
-        src = inspect.getsource(WindowsWorkspace.remove_mcp)
-        lines = [l for l in src.splitlines() if not l.strip().startswith("#")]
-        clean = "\n".join(lines)
-        self.assertFalse(
-            re.search(r"\b_save_mcp_file\s*\(", clean),
-            "remove_mcp must not call _save_mcp_file",
+        self.assertIs(
+            WindowsWorkspace.remove_mcp,
+            SandboxedWorkspaceBase.remove_mcp,
+        )
+        self.assertIs(
+            WindowsWorkspace.reset,
+            SandboxedWorkspaceBase.reset,
         )
 
     async def test_gateway_kill_hook_noop(self):
@@ -350,26 +339,7 @@ class TestWindowsWorkspace(IsolatedAsyncioTestCase):
             "new-nonce",
         )
 
-    async def test_remove_mcp_keeps_local_state_when_gateway_fails(self):
-        from agentscope.workspace import WindowsWorkspace
-
-        ws = WindowsWorkspace(
-            workspace_id="remove-failure",
-            host="h",
-            username="u",
-        )
-        ws._gateway = MagicMock()
-        mcp = MagicMock()
-        mcp.name = "demo"
-        mcp.close = AsyncMock(side_effect=RuntimeError("gateway rejected"))
-        ws._mcps = [mcp]
-
-        with self.assertRaisesRegex(RuntimeError, "gateway rejected"):
-            await ws.remove_mcp("demo")
-
-        self.assertEqual(ws._mcps, [mcp])
-
-    async def test_reset_can_resume_after_partial_mcp_failure(self):
+    async def test_reset_clears_shared_partitioned_state(self):
         from agentscope.workspace import WindowsWorkspace
 
         ws = WindowsWorkspace(
@@ -377,27 +347,19 @@ class TestWindowsWorkspace(IsolatedAsyncioTestCase):
             host="h",
             username="u",
         )
-        ws._gateway = MagicMock()
-        first = MagicMock(name="first")
-        first.close = AsyncMock()
-        second = MagicMock(name="second")
-        second.close = AsyncMock(side_effect=RuntimeError("gateway rejected"))
-        ws._mcps = [first, second]
+        ws._mcp_specs[("agent", "session")] = []
+        ws._equipped_partitions.add("agent")
+        ws._close_all_mcp_instances = AsyncMock()
         backend = MagicMock()
         backend.delete_path = AsyncMock()
         ws._backend = backend
 
-        with self.assertRaisesRegex(RuntimeError, "gateway rejected"):
-            await ws.reset()
-
-        self.assertEqual(ws._mcps, [second])
-        first.close.assert_awaited_once_with(ignore_errors=False)
-
-        second.close.side_effect = None
         await ws.reset()
 
-        self.assertEqual(ws._mcps, [])
-        self.assertEqual(backend.delete_path.await_count, 3)
+        ws._close_all_mcp_instances.assert_awaited_once()
+        self.assertEqual(ws._mcp_specs, {})
+        self.assertEqual(ws._equipped_partitions, set())
+        self.assertEqual(backend.delete_path.await_count, 4)
 
 
 @unittest.skipUnless(asyncssh is not None, _SKIP)
@@ -419,6 +381,7 @@ class TestWinGatewayClient(IsolatedAsyncioTestCase):
         )
 
         client = WinGatewayClient(
+            backend=MagicMock(),
             base_url="http://127.0.0.1:19999",
             auth_token="tok_test",
         )
@@ -436,12 +399,42 @@ class TestWinGatewayClient(IsolatedAsyncioTestCase):
         # Verify httpx was called, not backend.exec_shell.
         mock_http.request.assert_called_once()
 
+    async def test_exec_request_encodes_agent_and_session_params(self):
+        from agentscope.workspace._windows._win_gateway_client import (
+            WinGatewayClient,
+        )
+
+        client = WinGatewayClient(
+            backend=MagicMock(),
+            base_url="http://127.0.0.1:19999",
+        )
+        response = MagicMock(status_code=200, content=b"[]")
+        mock_http = AsyncMock()
+        mock_http.request = AsyncMock(return_value=response)
+        client._http_client = mock_http
+
+        await client.exec_request(
+            "GET",
+            "/mcps",
+            params={"agent_id": "agent/a", "session_id": "session b"},
+        )
+
+        self.assertEqual(
+            mock_http.request.await_args.args[:2],
+            ("GET", "/mcps?agent_id=agent%2Fa&session_id=session+b"),
+        )
+
     async def test_aclose_closes_http(self):
         from agentscope.workspace._windows._win_gateway_client import (
             WinGatewayClient,
         )
 
-        client = WinGatewayClient(base_url="http://127.0.0.1:1")
+        backend = MagicMock()
+        client = WinGatewayClient(
+            backend=backend,
+            base_url="http://127.0.0.1:1",
+        )
+        self.assertIs(client.backend, backend)
         mock_http = AsyncMock()
         mock_http.aclose = AsyncMock()
         client._http_client = mock_http
@@ -454,7 +447,10 @@ class TestWinGatewayClient(IsolatedAsyncioTestCase):
             WinGatewayClient,
         )
 
-        client = WinGatewayClient(base_url="http://127.0.0.1:1")
+        client = WinGatewayClient(
+            backend=MagicMock(),
+            base_url="http://127.0.0.1:1",
+        )
         first_http = AsyncMock()
         first_http.request = AsyncMock(
             side_effect=httpx.ConnectError("tunnel closed"),
@@ -481,7 +477,10 @@ class TestWinGatewayClient(IsolatedAsyncioTestCase):
             WinGatewayClient,
         )
 
-        client = WinGatewayClient(base_url="http://127.0.0.1:1")
+        client = WinGatewayClient(
+            backend=MagicMock(),
+            base_url="http://127.0.0.1:1",
+        )
         mock_http = AsyncMock()
         mock_http.request = AsyncMock(
             side_effect=httpx.ConnectError("response lost"),
@@ -494,7 +493,36 @@ class TestWinGatewayClient(IsolatedAsyncioTestCase):
             await client.exec_request("POST", "/mcps", body={"name": "x"})
 
         recover.assert_awaited_once()
-        mock_http.request.assert_awaited_once()
+        self.assertEqual(
+            [call.args[:2] for call in mock_http.request.await_args_list],
+            [("POST", "/mcps"), ("GET", "/health")],
+        )
+
+    async def test_final_transport_failure_uses_remote_log_diagnostic(self):
+        import httpx
+        from agentscope.workspace._windows._win_gateway_client import (
+            WinGatewayClient,
+        )
+
+        backend = MagicMock()
+        backend.read_file = AsyncMock(return_value=b"gateway crashed")
+        client = WinGatewayClient(
+            backend=backend,
+            base_url="http://127.0.0.1:1",
+            gateway_log_path=r"C:\workspace\.gateway\gateway.log",
+        )
+        mock_http = AsyncMock()
+        error = httpx.ConnectError("tunnel closed")
+        mock_http.request = AsyncMock(side_effect=error)
+        client._http_client = mock_http
+
+        with self.assertRaises(httpx.ConnectError) as raised:
+            await client.exec_request("GET", "/mcps")
+
+        self.assertIs(raised.exception, error)
+        backend.read_file.assert_awaited_once_with(
+            r"C:\workspace\.gateway\gateway.log",
+        )
 
 
 def _load_supervisor_module():
@@ -651,22 +679,8 @@ class TestWindowsSupervisor(IsolatedAsyncioTestCase):
         self.assertNotIn(5601, supervisor._port_pool)
 
 
-class TestCrossPlatformHooks(unittest.TestCase):
-    """Shared extension points remain backward compatible."""
-
-    def test_windows_file_uri_uses_backend_path_semantics(self):
-        from agentscope.workspace._base import WorkspaceBase
-
-        backend = MagicMock()
-        backend.isabs.return_value = True
-        uri = WorkspaceBase._path_to_file_uri(
-            r"C:\ProgramData\AgentScope\ws\x\data\a.png",
-            backend=backend,
-        )
-        self.assertEqual(
-            uri,
-            "file:///C:/ProgramData/AgentScope/ws/x/data/a.png",
-        )
+class TestWindowsToolAdaptations(IsolatedAsyncioTestCase):
+    """Windows-specific executable-path adaptations."""
 
     def test_glob_and_grep_accept_explicit_executables(self):
         import inspect
@@ -681,11 +695,44 @@ class TestCrossPlatformHooks(unittest.TestCase):
             inspect.signature(Grep.__init__).parameters,
         )
 
+    async def test_glob_uses_explicit_windows_python(self):
+        from agentscope.tool import Glob
 
-class TestGatewayPersistence(unittest.TestCase):
-    """Gateway mutations persist the authoritative MCP snapshot."""
+        backend = MagicMock()
+        backend.isabs.return_value = True
+        backend.is_dir = AsyncMock(return_value=True)
+        result = MagicMock(exit_code=0, stdout=b"[]", stderr=b"")
+        backend.exec_shell = AsyncMock(return_value=result)
+        tool = Glob(
+            backend=backend,
+            glob_helper_path=r"C:\helper.py",
+            python_bin=r"C:\python.exe",
+        )
 
-    def test_add_and_remove_persist_atomically(self):
+        await tool(pattern="*.py", path=r"C:\workspace")
+
+        command = backend.exec_shell.await_args.args[0]
+        self.assertEqual(command[0], r"C:\python.exe")
+
+    async def test_grep_uses_explicit_windows_ripgrep(self):
+        from agentscope.tool import Grep
+
+        backend = MagicMock()
+        backend.isabs.return_value = True
+        result = MagicMock(exit_code=1, stdout=b"", stderr=b"")
+        backend.exec_shell = AsyncMock(return_value=result)
+        tool = Grep(backend=backend, rg_path=r"C:\rg.exe")
+
+        await tool(pattern="needle", path=r"C:\workspace")
+
+        command = backend.exec_shell.await_args.args[0]
+        self.assertEqual(command[0], r"C:\rg.exe")
+
+
+class TestGatewayIsolation(unittest.TestCase):
+    """Gateway keeps runtime MCPs isolated by agent and session."""
+
+    def test_add_list_and_remove_are_partitioned(self):
         from fastapi.testclient import TestClient
         from agentscope.workspace._mcp_gateway import _mcp_gateway_app
 
@@ -699,86 +746,39 @@ class TestGatewayPersistence(unittest.TestCase):
             "command": "demo.exe",
         }
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = pathlib.Path(tmpdir, ".mcp")
-            config.write_text("[]", encoding="utf-8")
-            app = _mcp_gateway_app._build_app(
-                _mcp_gateway_app._State(),
-                config_path=str(config),
-            )
-            client = TestClient(app)
-
-            with patch.object(
-                _mcp_gateway_app,
-                "_build_client",
-                new=AsyncMock(return_value=fake_client),
-            ):
-                response = client.post(
-                    "/mcps",
-                    json=fake_client.model_dump.return_value,
-                )
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(
-                json.loads(config.read_text()),
-                [
-                    fake_client.model_dump.return_value,
-                ],
-            )
-
-            response = client.delete("/mcps/demo")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(json.loads(config.read_text()), [])
-
-    def test_add_rolls_back_when_persistence_fails(self):
-        from fastapi.testclient import TestClient
-        from agentscope.workspace._mcp_gateway import _mcp_gateway_app
-
-        fake_client = MagicMock()
-        fake_client.name = "demo"
-        fake_client.is_stateful = False
-        fake_client.is_connected = False
         state = _mcp_gateway_app._State()
-        app = _mcp_gateway_app._build_app(state, config_path="ignored")
-
-        with (
-            patch.object(
-                _mcp_gateway_app,
-                "_build_client",
-                new=AsyncMock(return_value=fake_client),
-            ),
-            patch.object(
-                _mcp_gateway_app,
-                "_save_mcp_atomic",
-                side_effect=OSError("disk full"),
-            ),
-        ):
-            response = TestClient(app).post("/mcps", json={"name": "demo"})
-
-        self.assertEqual(response.status_code, 500)
-        self.assertNotIn("demo", state.clients)
-
-    def test_remove_rolls_back_when_persistence_fails(self):
-        from fastapi.testclient import TestClient
-        from agentscope.workspace._mcp_gateway import _mcp_gateway_app
-
-        fake_client = MagicMock()
-        fake_client.name = "demo"
-        fake_client.is_stateful = False
-        fake_client.is_connected = False
-        state = _mcp_gateway_app._State()
-        state.clients["demo"] = fake_client
-        app = _mcp_gateway_app._build_app(state, config_path="ignored")
+        app = _mcp_gateway_app._build_app(state)
+        client = TestClient(app)
 
         with patch.object(
             _mcp_gateway_app,
-            "_save_mcp_atomic",
-            side_effect=OSError("disk full"),
+            "_build_client",
+            new=AsyncMock(return_value=fake_client),
         ):
-            response = TestClient(app).delete("/mcps/demo")
+            response = client.post(
+                "/mcps?agent_id=agent-a&session_id=session-1",
+                json=fake_client.model_dump.return_value,
+            )
 
-        self.assertEqual(response.status_code, 500)
-        self.assertIs(state.clients["demo"], fake_client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            client.get(
+                "/mcps?agent_id=agent-a&session_id=session-1",
+            ).json(),
+            [fake_client.model_dump.return_value],
+        )
+        self.assertEqual(
+            client.get(
+                "/mcps?agent_id=agent-a&session_id=session-2",
+            ).json(),
+            [],
+        )
+
+        response = client.delete(
+            "/mcps/demo?agent_id=agent-a&session_id=session-1",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(("agent-a", "session-1"), state.clients)
 
 
 if __name__ == "__main__":
