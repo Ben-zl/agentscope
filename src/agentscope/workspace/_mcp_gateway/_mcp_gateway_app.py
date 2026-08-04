@@ -151,7 +151,13 @@ def _build_app(
             if not state.clients[(agent_id, session_id)]:
                 del state.clients[(agent_id, session_id)]
             if client.is_stateful and client.is_connected:
-                await client.close()
+                try:
+                    await client.close()
+                except Exception as e:  # noqa: BLE001
+                    print(
+                        f"[gateway] warning: failed to close {name!r}: {e}",
+                        flush=True,
+                    )
         return {"ok": True}
 
     @app.get("/mcps/{name}/tools")

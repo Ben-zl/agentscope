@@ -160,6 +160,7 @@ class Grep(ToolBase):
         self,
         middlewares: List[ToolMiddlewareBase] | None = None,
         backend: BackendBase | None = None,
+        rg_path: str = "rg",
     ) -> None:
         """Initialize the grep tool.
 
@@ -172,11 +173,14 @@ class Grep(ToolBase):
                 Ripgrep is always invoked via ``exec_shell`` so that
                 the same code path works for local, Docker, and E2B
                 backends.
+            rg_path (`str`, optional):
+                Backend-side ripgrep executable path.
         """
         from ._backend import LocalBackend
 
         super().__init__(middlewares=middlewares)
         self._backend = backend or LocalBackend()
+        self._rg_path = rg_path
 
     async def check_permissions(
         self,
@@ -286,7 +290,7 @@ class Grep(ToolBase):
         a shell), so the same code path works for local, Docker, and E2B
         backends and needs no platform-specific argument quoting.
         """
-        command = ["rg", *args, search_path]
+        command = [self._rg_path, *args, search_path]
 
         result = await self._backend.exec_shell(
             command,

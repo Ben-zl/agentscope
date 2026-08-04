@@ -12,6 +12,7 @@ from ._k8s import K8sBackend, K8sWorkspace
 from ._opensandbox import OpenSandboxBackend, OpenSandboxWorkspace
 from ._applecontainer import AppleContainerBackend, AppleContainerWorkspace
 from ._bubblewrap import BubblewrapBackend, BubblewrapWorkspace
+from ._windows import WindowsSSHBackend, WindowsWorkspace
 
 
 __all__ = [
@@ -32,4 +33,6 @@ __all__ = [
     "OpenSandboxWorkspace",
     "AppleContainerBackend",
     "AppleContainerWorkspace",
+    "WindowsSSHBackend",
+    "WindowsWorkspace",
 ]

@@ -87,12 +87,14 @@ workspace-e2b = ["e2b"]
 workspace-daytona = ["daytona"]
 workspace-k8s = ["kubernetes-asyncio"]
 workspace-opensandbox = ["opensandbox"]
+workspace-ssh = ["asyncssh"]
 workspace = [
     "agentscope[workspace-docker]",
     "agentscope[workspace-e2b]",
     "agentscope[workspace-daytona]",
     "agentscope[workspace-k8s]",
     "agentscope[workspace-opensandbox]",
+    "agentscope[workspace-ssh]",
 ]
 # ------------ Tools ------------
 # Ships the ``rg`` binary for the builtin Grep tool on LocalWorkspace

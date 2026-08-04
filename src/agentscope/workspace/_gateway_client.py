@@ -400,8 +400,8 @@ class GatewayClient:
 
     def __init__(
         self,
-        backend: "BackendBase",
-        gateway_port: int,
+        backend: "BackendBase | None" = None,
+        gateway_port: int = 0,
         *,
         timeout: float | None = None,
         inline_limit: int = BODY_INLINE_LIMIT,
@@ -635,6 +635,10 @@ class GatewayClient:
         path = f"{path}?{urlencode(params)}" if params else path
         body_file = ""
         wrote_body_file: str | None = None
+        if self.backend is None:
+            raise RuntimeError(
+                "GatewayClient requires a backend for shim transport.",
+            )
         if body is not None:
             body_file = f"{self.tmp_dir}/{uuid.uuid4().hex}.json"
             wrote_body_file = body_file

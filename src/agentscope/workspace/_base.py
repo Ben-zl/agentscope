@@ -292,6 +292,24 @@ class WorkspaceBase:
         """
         return None
 
+    @property
+    def _tmp_dir(self) -> str:
+        """Backend-side directory used for transient workspace files."""
+        return "/tmp"
+
+    async def _shell_makedirs(self, *dirs: str) -> None:
+        """Create backend directories using the default POSIX command."""
+        await self.get_backend().exec_shell(["mkdir", "-p", *dirs], cwd="/")
+
+    async def _shell_move(self, src: str, dst: str) -> None:
+        """Move a backend path using the default POSIX command."""
+        result = await self.get_backend().exec_shell(["mv", src, dst])
+        if not result.ok():
+            raise RuntimeError(
+                f"Failed to move {src!r} to {dst!r}: "
+                f"{result.stderr.decode('utf-8', 'replace')}",
+            )
+
     def __init__(
         self,
         *,
@@ -473,7 +491,10 @@ class WorkspaceBase:
         return True
 
     @staticmethod
-    def _path_to_file_uri(path: str) -> str:
+    def _path_to_file_uri(
+        path: str,
+        backend: BackendBase | None = None,
+    ) -> str:
         """Convert an absolute backend-side path to a ``file://`` URI.
 
         Absolute POSIX paths (every remote backend, plus
@@ -484,6 +505,8 @@ class WorkspaceBase:
         """
         if path.startswith("/"):
             return f"file://{path}"
+        if backend is not None and backend.isabs(path):
+            return "file:///" + path.replace("\\", "/")
         return Path(path).as_uri()
 
     # ── lifecycle (developer) ──────────────────────────────────────
@@ -1286,12 +1309,13 @@ class WorkspaceBase:
                 tf.add(skill_path, arcname=dir_name)
             tar_bytes = buf.getvalue()
 
-            tmp_path = f"/tmp/skill-{_generate_id()}.tar"
+            tmp_path = backend.join_path(
+                self._tmp_dir,
+                f"skill-{_generate_id()}.tar",
+            )
             await backend.write_file(tmp_path, tar_bytes)
 
-            await backend.exec_shell(
-                ["mkdir", "-p", partition],
-            )
+            await self._shell_makedirs(partition)
             result = await backend.exec_shell(
                 [
                     self._python_command,
@@ -1356,10 +1380,13 @@ class WorkspaceBase:
         backend = self.get_backend()
         partition = await self._equip_partition(agent_id)
         suffix = "tar.gz" if fmt == "tar.gz" else fmt
-        archive_path = f"/tmp/skill-{_generate_id()}.{suffix}"
+        archive_path = backend.join_path(
+            self._tmp_dir,
+            f"skill-{_generate_id()}.{suffix}",
+        )
 
         async with self._skill_lock:
-            await backend.exec_shell(["mkdir", "-p", partition])
+            await self._shell_makedirs(partition)
             # Staged beside ``skills/`` rather than inside it: the same
             # filesystem keeps the final rename atomic, while
             # ``list_skills`` never sees a half-expanded archive.
@@ -1388,18 +1415,11 @@ class WorkspaceBase:
 
                 root = await self._find_skill_root(staging)
                 installed = await self._free_skill_dir(dir_name, partition)
-                move = await backend.exec_shell(
-                    [
-                        "mv",
-                        root,
-                        backend.join_path(partition, installed),
-                    ],
+                destination = backend.join_path(partition, installed)
+                await self._shell_move(
+                    root,
+                    destination,
                 )
-                if not move.ok():
-                    raise RuntimeError(
-                        f"Failed to install skill {installed!r}: "
-                        f"{move.stderr.decode('utf-8', 'replace')}",
-                    )
             finally:
                 await backend.delete_path(staging)
                 await backend.delete_path(archive_path)

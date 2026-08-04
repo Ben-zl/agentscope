@@ -82,6 +82,7 @@ codebase."""  # ignore: E501
         self,
         backend: BackendBase | None = None,
         glob_helper_path: str | None = None,
+        python_bin: str | None = None,
         middlewares: List[ToolMiddlewareBase] | None = None,
     ) -> None:
         """Initialize the glob tool.
@@ -99,6 +100,9 @@ codebase."""  # ignore: E501
                 (suitable for :class:`LocalBackend`). Remote backends
                 (Docker, E2B) should pass the path where the script
                 was deployed during workspace initialization.
+            python_bin (`str | None`, optional):
+                Backend-side Python executable. Local tools default to the
+                current interpreter; remote tools default to ``python3``.
         """
         from ._backend import LocalBackend
 
@@ -108,6 +112,7 @@ codebase."""  # ignore: E501
         # current interpreter (``sys.executable``) rather than assuming
         # ``python3`` is on PATH.
         self._is_local = isinstance(self._backend, LocalBackend)
+        self._python_bin = python_bin
         self._glob_helper_path = (
             glob_helper_path
             if glob_helper_path is not None
@@ -252,7 +257,9 @@ codebase."""  # ignore: E501
         # (``python3`` may be absent, e.g. on Windows or venvs exposing
         # only ``python``); remote backends run inside Linux images
         # where ``python3`` is the safe choice.
-        python = sys.executable if self._is_local else "python3"
+        python = self._python_bin or (
+            sys.executable if self._is_local else "python3"
+        )
         command = [
             python,
             self._glob_helper_path,
@@ -271,9 +278,11 @@ codebase."""  # ignore: E501
             return ToolChunk(
                 content=[
                     TextBlock(
-                        text=f"Glob helper failed: {stderr}"
-                        if stderr
-                        else "Glob helper failed with no error output.",
+                        text=(
+                            f"Glob helper failed: {stderr}"
+                            if stderr
+                            else "Glob helper failed with no error output."
+                        ),
                     ),
                 ],
                 state=ToolResultState.ERROR,
