@@ -250,11 +250,27 @@ Usage:
             )
 
         # Check if file exists, it must be read first if it exists
-        if (
-            await self._backend.file_exists(file_path)
-            and _agent_state is not None
-        ):
-            cache = await _agent_state.tool_context.get_cache(file_path)
+        file_existed = await self._backend.file_exists(file_path)
+        if file_existed and _agent_state is not None:
+            mtime = await self._backend.stat_mtime(file_path)
+            if mtime is None:
+                return ToolChunk(
+                    content=[
+                        TextBlock(
+                            text=(
+                                "Error: Cannot verify the file state through "
+                                "the workspace backend. Read-before-write "
+                                "protection cannot authorize this write."
+                            ),
+                        ),
+                    ],
+                    state=ToolResultState.ERROR,
+                    is_last=True,
+                )
+            cache = await _agent_state.tool_context.get_cache(
+                file_path,
+                mtime=mtime,
+            )
             if cache is None:
                 return ToolChunk(
                     content=[
@@ -274,7 +290,6 @@ Usage:
         # Track ``file_existed`` separately from ``previous_content`` because
         # an *existing* empty file overwrite is not the same as creating a
         # new file — the diff header must reflect that.
-        file_existed = await self._backend.file_exists(file_path)
         previous_content = ""
         if file_existed:
             try:
@@ -293,6 +308,8 @@ Usage:
         )
 
         # Write content to file (backend handles parent dir creation)
+        if _agent_state is not None:
+            _agent_state.tool_context.invalidate_file_cache(file_path)
         await self._backend.write_file(
             file_path,
             content.encode("utf-8"),

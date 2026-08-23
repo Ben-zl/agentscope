@@ -499,8 +499,13 @@ Usage:
         try:
             # Read file content via backend
             lines = None
+            mtime_before = None
             if _agent_state is not None:
-                cache = await _agent_state.tool_context.get_cache(file_path)
+                mtime_before = await self._backend.stat_mtime(file_path)
+                cache = await _agent_state.tool_context.get_cache(
+                    file_path,
+                    mtime=mtime_before,
+                )
                 if cache is not None:
                     lines = cache.lines
 
@@ -515,10 +520,16 @@ Usage:
 
                 # Cache file if state is provided
                 if _agent_state is not None:
-                    await _agent_state.tool_context.cache_file(
-                        file_path=file_path,
-                        lines=lines,
-                    )
+                    mtime_after = await self._backend.stat_mtime(file_path)
+                    if (
+                        mtime_before is not None
+                        and mtime_before == mtime_after
+                    ):
+                        await _agent_state.tool_context.cache_file(
+                            file_path=file_path,
+                            lines=lines,
+                            mtime=mtime_after,
+                        )
 
             # Apply offset and limit (offset is 1-based)
             start_idx = offset - 1

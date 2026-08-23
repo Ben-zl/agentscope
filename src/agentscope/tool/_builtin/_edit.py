@@ -301,7 +301,25 @@ Usage:
 
         content = None
         if _agent_state is not None:
-            cache = await _agent_state.tool_context.get_cache(file_path)
+            mtime = await self._backend.stat_mtime(file_path)
+            if mtime is None:
+                return ToolChunk(
+                    content=[
+                        TextBlock(
+                            text=(
+                                "Error: Cannot verify the file state through "
+                                "the workspace backend. Read-before-write "
+                                "protection cannot authorize this edit."
+                            ),
+                        ),
+                    ],
+                    state=ToolResultState.ERROR,
+                    is_last=True,
+                )
+            cache = await _agent_state.tool_context.get_cache(
+                file_path,
+                mtime=mtime,
+            )
             if cache is None:
                 # Haven't read this file before
                 return ToolChunk(
@@ -374,6 +392,8 @@ Usage:
             )
 
         # Write updated content back to file via backend
+        if _agent_state is not None:
+            _agent_state.tool_context.invalidate_file_cache(file_path)
         try:
             await self._backend.write_file(
                 file_path,

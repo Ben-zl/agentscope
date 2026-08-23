@@ -20,6 +20,13 @@ from ..message import (
 from ..permission import PermissionContext
 
 
+class _UseHostMtime:
+    """表示调用方未提供 mtime，继续使用本地文件系统。"""
+
+
+_USE_HOST_MTIME = _UseHostMtime()
+
+
 class ReadCacheEntry(BaseModel):
     """The read file cache."""
 
@@ -43,11 +50,16 @@ class ToolContext(BaseModel):
     """The names of the activated tool groups, each group contains a set of
     tools."""
 
-    async def get_cache(self, file_path: str) -> ReadCacheEntry | None:
+    async def get_cache(
+        self,
+        file_path: str,
+        mtime: float | None | _UseHostMtime = _USE_HOST_MTIME,
+    ) -> ReadCacheEntry | None:
         """Get cached file content if still valid.
 
         Args:
             file_path: The absolute path of the file.
+            mtime: 文件所属 backend 返回的修改时间；未传时兼容本地路径。
 
         Returns:
             The cached entry if valid, otherwise None.
@@ -57,33 +69,41 @@ class ToolContext(BaseModel):
         for idx, entry in enumerate(self.read_file_cache):
             if entry.file_path == file_path:
                 # Check if cache is still valid
-                try:
-                    updated_at = await aiofiles.os.path.getmtime(file_path)
-                    if updated_at == entry.updated_at:
-                        self.read_file_cache.pop(idx)
-                        self.read_file_cache.append(entry)
-                        return entry
-                    else:
-                        # Cache is outdated, remove it
-                        self.read_file_cache.remove(entry)
-                        return None
-                except Exception:
-                    # File might not exist anymore
+                if mtime is _USE_HOST_MTIME:
+                    try:
+                        mtime = await aiofiles.os.path.getmtime(file_path)
+                    except Exception:
+                        mtime = None
+
+                if mtime is None or mtime != entry.updated_at:
                     self.read_file_cache.remove(entry)
                     return None
+                self.read_file_cache.pop(idx)
+                self.read_file_cache.append(entry)
+                return entry
         return None
 
-    async def cache_file(self, file_path: str, lines: list[str]) -> None:
+    async def cache_file(
+        self,
+        file_path: str,
+        lines: list[str],
+        mtime: float | None | _UseHostMtime = _USE_HOST_MTIME,
+    ) -> None:
         """Cache file content with LRU eviction.
 
         Args:
             file_path: The absolute path of the file.
             lines: The lines of the file content.
+            mtime: 文件所属 backend 返回的修改时间；未传时兼容本地路径。
         """
-        try:
-            updated_at = await aiofiles.os.path.getmtime(file_path)
-        except Exception:
-            # Cannot get mtime, skip caching
+        if mtime is _USE_HOST_MTIME:
+            try:
+                mtime = await aiofiles.os.path.getmtime(file_path)
+            except Exception:
+                mtime = None
+
+        if mtime is None:
+            self.invalidate_file_cache(file_path)
             return
 
         # Calculate size in KB
@@ -115,11 +135,19 @@ class ToolContext(BaseModel):
         self.read_file_cache.append(
             ReadCacheEntry(
                 lines=lines,
-                updated_at=updated_at,
+                updated_at=mtime,
                 bytes=new_entry_bytes,
                 file_path=file_path,
             ),
         )
+
+    def invalidate_file_cache(self, file_path: str) -> None:
+        """使指定文件的已读证明失效。"""
+        self.read_file_cache = [
+            entry
+            for entry in self.read_file_cache
+            if entry.file_path != file_path
+        ]
 
     async def clean_file_cache(
         self,

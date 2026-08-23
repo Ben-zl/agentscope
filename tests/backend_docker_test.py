@@ -26,7 +26,8 @@ import unittest
 import uuid
 from unittest.async_case import IsolatedAsyncioTestCase
 
-from agentscope.tool import ExecResult
+from agentscope.state import AgentState
+from agentscope.tool import Edit, ExecResult, Read, Write
 from agentscope.workspace import DockerWorkspace, DockerBackend
 from agentscope.workspace._docker._make_dockerfile import CONTAINER_WORKDIR
 
@@ -147,6 +148,65 @@ class TestDockerBackend(IsolatedAsyncioTestCase):
         payload = b"a\r\nb\x00\xffc"
         await self.backend.write_file(path, payload)
         self.assertEqual(await self.backend.read_file(path), payload)
+
+    async def test_file_tools_require_reread_between_docker_edits(
+        self,
+    ) -> None:
+        """Docker 文件每次 Edit 后都应重新建立已读证明。"""
+        path = f"{CONTAINER_WORKDIR}/edit-cache.txt"
+        await self.backend.write_file(path, b"alpha\n")
+        state = AgentState()
+        read_tool = Read(backend=self.backend)
+        edit_tool = Edit(backend=self.backend)
+
+        read = await read_tool(file_path=path, _agent_state=state)
+        first_edit = await edit_tool(
+            file_path=path,
+            old_string="alpha",
+            new_string="beta",
+            _agent_state=state,
+        )
+        second_edit = await edit_tool(
+            file_path=path,
+            old_string="alpha",
+            new_string="gamma",
+            _agent_state=state,
+        )
+
+        self.assertEqual(read.state.value, "running")
+        self.assertEqual(first_edit.state.value, "running")
+        self.assertEqual(second_edit.state.value, "error")
+        self.assertEqual(await self.backend.read_file(path), b"beta\n")
+
+        await read_tool(file_path=path, _agent_state=state)
+        third_edit = await edit_tool(
+            file_path=path,
+            old_string="beta",
+            new_string="gamma",
+            _agent_state=state,
+        )
+        self.assertEqual(third_edit.state.value, "running")
+        self.assertEqual(await self.backend.read_file(path), b"gamma\n")
+
+    async def test_file_tools_read_then_write_in_docker(self) -> None:
+        """Docker backend 的 Read proof 应允许覆盖既有文件。"""
+        path = f"{CONTAINER_WORKDIR}/write-cache.txt"
+        await self.backend.write_file(path, b"alpha\n")
+        state = AgentState()
+
+        read = await Read(backend=self.backend)(
+            file_path=path,
+            _agent_state=state,
+        )
+        write = await Write(backend=self.backend)(
+            file_path=path,
+            content="beta\n",
+            _agent_state=state,
+        )
+
+        self.assertEqual(read.state.value, "running")
+        self.assertEqual(write.state.value, "running")
+        self.assertEqual(await self.backend.read_file(path), b"beta\n")
 
     async def test_read_missing_file_raises(self) -> None:
         """Reading a non-existent file raises ``FileNotFoundError``."""
